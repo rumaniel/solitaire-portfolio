@@ -1,0 +1,121 @@
+name: Build
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Same Node 24 escape hatch as the Test workflow — see test.yml for context.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+# Single mac-mini runner means at most one job runs at a time regardless of
+# concurrency. We cancel in-progress runs only for PRs so rapid PR pushes
+# don't queue up; main pushes and manual dispatches run to completion.
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Android
+            method: Editor.Tools.CIBuilder.BuildAndroid
+          # WebGL deferred — NuGet packages bring in runtime-specific native
+          # libs (e.g., SourceGear.sqlite3 ios-arm64/native/*.a) that
+          # Emscripten can't link. Re-add after a PluginImporter helper
+          # marks them WebGL-incompatible. See PR follow-up.
+    env:
+      UNITY: /Applications/Unity/Hub/Editor/6000.3.15f1/Unity.app/Contents/MacOS/Unity
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Restore NuGet packages
+        shell: bash
+        run: |
+          export PATH="$HOME/.dotnet/tools:/opt/homebrew/bin:/usr/local/share/dotnet:$PATH"
+          nugetforunity restore .
+
+      # NuGetForUnity drops platform-specific native binaries (e.g.,
+      # SourceGear.sqlite3 ships runtimes/ios-arm64/native/e_sqlite3.a) into
+      # Assets/Packages without per-platform PluginImporter metadata. The
+      # Android NDK linker then chokes on iOS Mach-O .a files with
+      # "ld.lld: error: ... unknown file type". Strip every runtime/<rid>/
+      # whose rid prefix doesn't match the current build target before Unity
+      # starts. They're regenerated on the next NuGet restore for whichever
+      # target needs them.
+      - name: Strip non-target runtime binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          case "$TARGET" in
+            Android) keep_prefix="android" ;;
+            WebGL)   keep_prefix="browser" ;;
+            *)       keep_prefix="__none__" ;;
+          esac
+          if [ ! -d Assets/Packages ]; then
+            echo "No Assets/Packages — nothing to strip"
+            exit 0
+          fi
+          stripped=0
+          while IFS= read -r dir; do
+            rid=$(basename "$dir")
+            case "$rid" in
+              ${keep_prefix}*) ;;
+              *) rm -rf "$dir" "$dir.meta" 2>/dev/null && stripped=$((stripped + 1)) ;;
+            esac
+          done < <(find Assets/Packages -mindepth 3 -maxdepth 3 -type d -path "*/runtimes/*")
+          echo "Stripped $stripped non-$TARGET runtime(s) from Assets/Packages."
+
+      - name: Build ${{ matrix.target }}
+        shell: bash
+        env:
+          # Android signing — Variables hold non-secret bits (path on the
+          # runner, alias name); Secrets hold the keystore + alias passwords.
+          # Missing values trigger a debug-keystore fallback inside CIBuilder.
+          ANDROID_KEYSTORE_PATH: ${{ vars.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYALIAS_NAME: ${{ vars.ANDROID_KEYALIAS_NAME }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEYALIAS_PASSWORD: ${{ secrets.ANDROID_KEYALIAS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          "$UNITY" \
+            -batchmode \
+            -nographics \
+            -projectPath "$GITHUB_WORKSPACE" \
+            -buildTarget ${{ matrix.target }} \
+            -executeMethod ${{ matrix.method }} \
+            -logFile "$GITHUB_WORKSPACE/build-logs/${{ matrix.target }}.log"
+
+      # PR / push-to-main runs are pure verification — we don't store the
+      # build output. Use workflow_dispatch when you need a build to share
+      # ad-hoc (e.g., to a tester). Release artifacts will go through a
+      # separate release.yml triggered on tag push.
+      - name: Upload ${{ matrix.target }} artifact
+        if: success() && github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v5
+        with:
+          name: solitaire-${{ matrix.target }}
+          path: build/${{ matrix.target }}
+          retention-days: 7
+
+      # Build log only on failure (debug aid) or manual dispatch (audit).
+      - name: Upload ${{ matrix.target }} build log
+        if: failure() || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log-${{ matrix.target }}
+          path: build-logs/${{ matrix.target }}.log
+          retention-days: 3

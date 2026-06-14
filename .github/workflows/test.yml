@@ -1,0 +1,60 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Force any JS actions still on Node 20 to run under Node 24 (GitHub deprecates
+# Node 20 on 2026-09-16). actions/upload-artifact@v5 has not yet shipped a
+# Node 24-native release; remove this env once it does.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+# Cancel superseded runs on the same ref (PR-scoped under pull_request).
+concurrency:
+  group: test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  edit-mode-tests:
+    name: EditMode Tests
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 30
+    env:
+      # GameCI's unity-test-runner@v4 errors with "Currently darwin-platform is not supported"
+      # on macOS hosts, so we invoke Unity directly. Bump this path when upgrading Editor.
+      UNITY: /Applications/Unity/Hub/Editor/6000.3.15f1/Unity.app/Contents/MacOS/Unity
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Assets/Packages/ is .gitignored — NuGetForUnity's auto-restore runs only in
+      # interactive Editor sessions, never in batchmode, so we restore explicitly.
+      - name: Restore NuGet packages
+        shell: bash
+        run: |
+          export PATH="$HOME/.dotnet/tools:/opt/homebrew/bin:/usr/local/share/dotnet:$PATH"
+          nugetforunity restore .
+
+      - name: Run EditMode tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results
+          "$UNITY" \
+            -batchmode \
+            -nographics \
+            -projectPath "$GITHUB_WORKSPACE" \
+            -runTests \
+            -testPlatform EditMode \
+            -testResults "$GITHUB_WORKSPACE/test-results/editmode-results.xml" \
+            -logFile "$GITHUB_WORKSPACE/test-results/unity.log"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results
+          path: test-results
+          retention-days: 7

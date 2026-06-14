@@ -1,0 +1,30 @@
+{
+    "name": "Gateway",
+    "rootNamespace": "",
+    "references": [
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:5f49831981d53e243b3bdefc2f57dd15",
+        "GUID:756335c0388f7114790e504ed368ae1d",
+        "GUID:26845efb0a4c32b41805c378a317b1c3",
+        "GUID:9e24947de15b9834991c9d8411ea37cf",
+        "GUID:84651a3751eca9349aac36a66bba901b",
+        "GUID:593a5b492d29ac6448b1ebf7f035ef33"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "MemoryPack.Core.dll",
+        "Firebase.App.dll",
+        "Firebase.Auth.dll",
+        "Firebase.Platform.dll",
+        "Firebase.TaskExtension.dll",
+        "Firebase.Analytics.dll",
+        "Firebase.Crashlytics.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -1,0 +1,21 @@
+{
+    "name": "Service.AchievementService.Google",
+    "rootNamespace": "",
+    "references": [
+        "Service",
+        "Google.Play.Games",
+        "UniTask"
+    ],
+    "includePlatforms": [
+        "Android",
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

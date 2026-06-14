@@ -1,0 +1,29 @@
+{
+    "name": "Scene",
+    "rootNamespace": "",
+    "references": [
+        "GUID:b0214a6008ed146ff8f122a6a9c2f6cc",
+        "GUID:77221876cc6b8244180b96e320b1bcd4",
+        "GUID:c2884e981ff3f174e8d34a4031fd112d",
+        "GUID:5f49831981d53e243b3bdefc2f57dd15",
+        "GUID:498379050a8343c469c361ec182f105d",
+        "GUID:6055be8ebefd69e48b49212b09b47b2f",
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:776d03a35f1b52c4a9aed9f56d7b4229",
+        "GUID:668f97445995c0344b77994edc2b018c",
+        "GUID:26845efb0a4c32b41805c378a317b1c3",
+        "GUID:ed7b289127fa01f4aa3ce2696d0e0506",
+        "GUID:ee8f9324eb0e1c2499f7011010a2c1ea",
+        "GUID:eec0964c48f6f4e40bc3ec2257ccf8c5",
+        "GUID:b051c00a6d3d7bd41ba079a6781c89c0"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

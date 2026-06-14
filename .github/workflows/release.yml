@@ -1,0 +1,352 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+# Default GITHUB_TOKEN omits pull-requests scope, so we declare it explicitly.
+permissions:
+  contents: read
+  pull-requests: read
+
+# Single global group: parallel runs from different refs would otherwise
+# query Play Console for the same max versionCode and collide at upload.
+concurrency:
+  group: release-${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  release-android:
+    name: Release Android (signed AAB + Play internal)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    env:
+      UNITY: /Applications/Unity/Hub/Editor/6000.3.15f1/Unity.app/Contents/MacOS/Unity
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          # fetch-depth 0 + fetch-tags so the release-notes step can resolve
+          # `git tag --list 'v*'` and `git log -1` on the tag's commit; the
+          # default shallow clone fetches neither.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Restore NuGet packages
+        shell: bash
+        run: |
+          export PATH="$HOME/.dotnet/tools:/opt/homebrew/bin:/usr/local/share/dotnet:$PATH"
+          nugetforunity restore .
+
+      - name: Strip non-Android runtime binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d Assets/Packages ]; then exit 0; fi
+          stripped=0
+          while IFS= read -r dir; do
+            rid=$(basename "$dir")
+            case "$rid" in
+              android*) ;;
+              *) rm -rf "$dir" "$dir.meta" 2>/dev/null && stripped=$((stripped + 1)) ;;
+            esac
+          done < <(find Assets/Packages -mindepth 3 -maxdepth 3 -type d -path "*/runtimes/*")
+          echo "Stripped $stripped non-Android runtime(s)."
+
+      - name: Determine next versionCode from Play Console
+        id: nextcode
+        shell: bash
+        env:
+          PLAY_CONSOLE_SERVICE_ACCOUNT: ${{ secrets.PLAY_CONSOLE_SERVICE_ACCOUNT }}
+          PACKAGE_NAME: ${{ vars.PLAY_CONSOLE_PACKAGE_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PACKAGE_NAME:-}" ] || [ -z "${PLAY_CONSOLE_SERVICE_ACCOUNT:-}" ]; then
+            echo "::error::PLAY_CONSOLE_PACKAGE_NAME (var) and PLAY_CONSOLE_SERVICE_ACCOUNT (secret) are required."
+            exit 1
+          fi
+
+          export PATH="/opt/homebrew/share/google-cloud-sdk/bin:/opt/homebrew/bin:$PATH"
+          export CLOUDSDK_CONFIG="$(mktemp -d)"
+          SA_FILE="$(mktemp)"
+          BODY_FILE="$(mktemp)"
+          trap 'rm -rf "$SA_FILE" "$BODY_FILE" "$CLOUDSDK_CONFIG"' EXIT
+
+          printf '%s' "$PLAY_CONSOLE_SERVICE_ACCOUNT" > "$SA_FILE"
+          gcloud auth activate-service-account --key-file="$SA_FILE" --quiet 2>/dev/null
+          TOKEN=$(gcloud auth print-access-token --scopes=https://www.googleapis.com/auth/androidpublisher --quiet 2>/dev/null)
+
+          # Errors go to stderr so GitHub Actions annotations surface even when
+          # the function is called via $(...). curl alone returns 0 on 4xx/5xx.
+          play_api() {
+            local method="$1" url="$2" code
+            code=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' \
+              -X "$method" \
+              -H "Authorization: Bearer $TOKEN" \
+              -H "Content-Length: 0" \
+              "$url")
+            case "$code" in 200|201|204) cat "$BODY_FILE"; return 0 ;; esac
+            echo "::error::Play API $method $url returned HTTP $code" >&2
+            cat "$BODY_FILE" >&2
+            return 1
+          }
+
+          EDIT=$(play_api POST \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/edits")
+          EDIT_ID=$(echo "$EDIT" | jq -r '.id // empty')
+          [ -n "$EDIT_ID" ] || { echo "::error::Edit response missing .id: $EDIT" >&2; exit 1; }
+
+          TRACKS=$(play_api GET \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/edits/${EDIT_ID}/tracks")
+          [ "$(echo "$TRACKS" | jq 'has("tracks")')" = "true" ] \
+            || { echo "::error::Tracks response missing .tracks: $TRACKS" >&2; exit 1; }
+
+          MAX=$(echo "$TRACKS" | jq '[.tracks[]?.releases[]?.versionCodes[]?] | map(tonumber) | max // 0')
+          [[ "$MAX" =~ ^[0-9]+$ ]] \
+            || { echo "::error::Failed to parse max versionCode: $MAX" >&2; exit 1; }
+          NEXT=$((MAX + 1))
+
+          curl -sS -X DELETE -H "Authorization: Bearer $TOKEN" \
+            "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/${PACKAGE_NAME}/edits/${EDIT_ID}" \
+            >/dev/null || true
+
+          echo "Play Console max=$MAX next=$NEXT"
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Build Android Release AAB
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ vars.ANDROID_KEYSTORE_PATH }}
+          ANDROID_KEYALIAS_NAME: ${{ vars.ANDROID_KEYALIAS_NAME }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEYALIAS_PASSWORD: ${{ secrets.ANDROID_KEYALIAS_PASSWORD }}
+          ANDROID_VERSION_CODE: ${{ steps.nextcode.outputs.next }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          "$UNITY" \
+            -batchmode \
+            -nographics \
+            -projectPath "$GITHUB_WORKSPACE" \
+            -buildTarget Android \
+            -executeMethod Editor.Tools.CIBuilder.BuildAndroidRelease \
+            -logFile "$GITHUB_WORKSPACE/build-logs/release-android.log"
+
+      - name: Capture release version
+        id: version
+        shell: bash
+        run: |
+          code=$(grep -E "^  AndroidBundleVersionCode:" ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          name=$(grep -E "^  bundleVersion:" ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "label=${name}-${code}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes from merged PRs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p distribution/whatsnew
+
+          # On a tag-push trigger, the just-pushed tag is already in the
+          # local refs after fetch-tags; exclude it so we use the *previous*
+          # release as the cutoff, not the one we're about to ship.
+          # `|| true`: when the pushed tag is the only v* tag, grep -v emits
+          # nothing and exits 1, which would otherwise trip pipefail and
+          # abort the step on the very first release.
+          LAST_TAG=$(git tag --list 'v*' --sort=-creatordate \
+            | grep -v -F -x "${GITHUB_REF_NAME:-}" \
+            | head -n1) || true
+
+          if [ -n "$LAST_TAG" ]; then
+            SINCE=$(git log -1 --format=%aI "$LAST_TAG")
+            echo "Last release tag: $LAST_TAG (PRs merged after $SINCE)"
+            CHANGELOG=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+              --base main --state merged \
+              --search "merged:>$SINCE" \
+              --limit 50 \
+              --json number,title \
+              --jq 'reverse | map("- \(.title) (#\(.number))") | join("\n")')
+          else
+            echo "No prior v* tag (or only the just-pushed one); using last 10 merged PRs."
+            CHANGELOG=$(gh pr list --repo "$GITHUB_REPOSITORY" \
+              --base main --state merged \
+              --limit 10 \
+              --json number,title \
+              --jq 'reverse | map("- \(.title) (#\(.number))") | join("\n")')
+          fi
+
+          # Truncate at line boundary, character-aware (Play Store ~500-char per
+          # locale; head -c 500 splits mid-title and corrupts UTF-8).
+          CHANGELOG=$(printf '%s' "$CHANGELOG" | python3 -c '
+          import sys
+          out, total = [], 0
+          for line in sys.stdin.read().splitlines():
+              nxt = total + len(line) + 1
+              if nxt > 500:
+                  break
+              out.append(line)
+              total = nxt
+          sys.stdout.write("\n".join(out))
+          ')
+
+          [ -n "$CHANGELOG" ] || CHANGELOG="Internal release."
+
+          printf '%s\n' "$CHANGELOG" > distribution/whatsnew/whatsnew-en-US
+          printf '%s\n' "$CHANGELOG" > distribution/whatsnew/whatsnew-ko-KR
+
+          echo "::group::Generated release notes"
+          cat distribution/whatsnew/whatsnew-en-US
+          echo "::endgroup::"
+
+      - name: Upload to Play Console internal track
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_CONSOLE_SERVICE_ACCOUNT }}
+          packageName: ${{ vars.PLAY_CONSOLE_PACKAGE_NAME }}
+          releaseFiles: build/Android/solitaire.aab
+          tracks: internal
+          whatsNewDirectory: distribution/whatsnew
+          status: draft
+
+      - name: Upload AAB artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: solitaire-android-${{ steps.version.outputs.label }}
+          path: build/Android/solitaire.aab
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log-${{ steps.version.outputs.label }}
+          path: build-logs/release-android.log
+          retention-days: 30
+          if-no-files-found: warn
+
+  release-webgl:
+    name: Release WebGL (itch.io + artifact)
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    env:
+      UNITY: /Applications/Unity/Hub/Editor/6000.3.15f1/Unity.app/Contents/MacOS/Unity
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Restore NuGet packages
+        shell: bash
+        run: |
+          export PATH="$HOME/.dotnet/tools:/opt/homebrew/bin:/usr/local/share/dotnet:$PATH"
+          nugetforunity restore .
+
+      - name: Strip non-WebGL runtime binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -d Assets/Packages ]; then exit 0; fi
+          stripped=0
+          while IFS= read -r dir; do
+            rid=$(basename "$dir")
+            case "$rid" in
+              browser*) ;;
+              *) rm -rf "$dir" "$dir.meta" 2>/dev/null && stripped=$((stripped + 1)) ;;
+            esac
+          done < <(find Assets/Packages -mindepth 3 -maxdepth 3 -type d -path "*/runtimes/*")
+          echo "Stripped $stripped non-WebGL runtime(s)."
+
+      - name: Build WebGL
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-logs
+          "$UNITY" \
+            -batchmode \
+            -nographics \
+            -projectPath "$GITHUB_WORKSPACE" \
+            -buildTarget WebGL \
+            -executeMethod Editor.Tools.CIBuilder.BuildWebGL \
+            -logFile "$GITHUB_WORKSPACE/build-logs/release-webgl.log"
+
+      - name: Capture release version
+        id: version
+        shell: bash
+        run: |
+          name=$(grep -E "^  bundleVersion:" ProjectSettings/ProjectSettings.asset | awk '{print $2}')
+          label="${name}-${GITHUB_RUN_NUMBER}"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
+      # butler is a small Go binary; on a self-hosted runner the install
+      # persists across runs, so subsequent invocations skip the download.
+      - name: Setup butler
+        shell: bash
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUTLER_API_KEY:-}" ]; then
+            echo "BUTLER_API_KEY not set; skipping butler install."
+            exit 0
+          fi
+          if ! command -v butler >/dev/null 2>&1 && [ ! -x "$HOME/.butler/butler" ]; then
+            curl -fsSL -o /tmp/butler.zip https://broth.itch.zone/butler/darwin-arm64/LATEST/archive/default
+            unzip -oq /tmp/butler.zip -d "$HOME/.butler"
+            chmod +x "$HOME/.butler/butler"
+          fi
+          echo "$HOME/.butler" >> "$GITHUB_PATH"
+
+      - name: Push to itch.io
+        shell: bash
+        env:
+          BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+          ITCH_USER: ${{ vars.ITCH_USER }}
+          ITCH_GAME: ${{ vars.ITCH_GAME }}
+          ITCH_CHANNEL: ${{ vars.ITCH_CHANNEL }}
+          VERSION_LABEL: ${{ steps.version.outputs.label }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BUTLER_API_KEY:-}" ]; then
+            echo "BUTLER_API_KEY not set; skipping itch.io upload (artifact will still be uploaded)."
+            exit 0
+          fi
+          if [ -z "${ITCH_USER:-}" ] || [ -z "${ITCH_GAME:-}" ]; then
+            echo "::warning::ITCH_USER or ITCH_GAME var not set; skipping itch.io upload."
+            exit 0
+          fi
+          channel="${ITCH_CHANNEL:-html5}"
+          target="${ITCH_USER}/${ITCH_GAME}:${channel}"
+          echo "Pushing build/WebGL to ${target} (version ${VERSION_LABEL})"
+          butler push build/WebGL "${target}" --userversion "${VERSION_LABEL}"
+
+      - name: Upload WebGL artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: solitaire-webgl-${{ steps.version.outputs.label }}
+          path: build/WebGL
+          retention-days: 30
+          if-no-files-found: warn
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: build-log-webgl-${{ steps.version.outputs.label }}
+          path: build-logs/release-webgl.log
+          retention-days: 30
+          if-no-files-found: warn
