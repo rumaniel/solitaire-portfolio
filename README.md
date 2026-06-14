@@ -1,8 +1,8 @@
 # Solitaire (Unity)
 
-> **TL;DR** — A production-grade mobile solitaire built as an engineering showcase: **five game families on one shared card engine, provably-solvable deal generation, and a full CI → Google Play release pipeline.** ~270 C# files across **13 compiler-isolated assemblies**, **~60 EditMode test suites**, Unity 2022.3.55f1.
+> **TL;DR** — A production-grade mobile solitaire built as an engineering showcase: **five game families on one shared card engine, provably-solvable deal generation, and a full CI → Google Play release pipeline.** ~270 C# files across **13 compiler-isolated assemblies**, **~60 EditMode test suites**, Unity 6.3.
 >
-> **요약** — 포트폴리오용으로 만든 프로덕션급 모바일 솔리테어. **하나의 공용 카드 엔진 위에 5개 게임군, "반드시 풀리는" 딜 생성, GitHub Actions → Google Play 배포 파이프라인**까지 갖췄다. C# 약 270개 파일, **컴파일러로 격리된 13개 어셈블리**, **EditMode 테스트 스위트 약 60개**, Unity 2022.3.55f1.
+> **요약** — 포트폴리오용으로 만든 프로덕션급 모바일 솔리테어. **하나의 공용 카드 엔진 위에 5개 게임군, "반드시 풀리는" 딜 생성, GitHub Actions → Google Play 배포 파이프라인**까지 갖췄다. C# 약 270개 파일, **컴파일러로 격리된 13개 어셈블리**, **EditMode 테스트 스위트 약 60개**, Unity 6.3.
 
 > **ℹ️ About this repository / 이 저장소에 대하여**
 >
@@ -60,7 +60,7 @@
 
 | | |
 |---|---|
-| Engine / 엔진 | Unity 2022.3.55f1 |
+| Engine / 엔진 | Unity 6.3 |
 | Code / 코드 | ~270 C# files · 13 assemblies |
 | Services / 서비스 | 20 interface-backed services |
 | Game families / 게임군 | 5 (Klondike, Easthaven, Spider, Pyramid, TriPeaks) |
